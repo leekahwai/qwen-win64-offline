@@ -4,9 +4,18 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest  # Windows x64 runner
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      # (Optional) sanity check that the folder and package.json exist
+      - name: Show tree
+        shell: pwsh
+        run: |
+          Write-Host "Repo root:"
+          Get-ChildItem -Force
+          Write-Host "`nqwen-offline contents:"
+          Get-ChildItem -Force qwen-offline
 
       - name: Install Node 20
         uses: actions/setup-node@v4
@@ -15,36 +24,36 @@ jobs:
 
       - name: Prepare offline bundle
         shell: pwsh
+        working-directory: qwen-offline
         run: |
           Set-StrictMode -Version Latest
-          cd qwen-offline
 
-          # 1) Create a dedicated npm cache folder
+          # 1) Dedicated npm cache dir
           New-Item -ItemType Directory -Force -Path npm-cache | Out-Null
 
-          # 2) Install deps (also generates package-lock.json)
-          #    This populates our local cache for offline installs later
+          # 2) Install deps (creates package-lock.json) and fully warms cache
           npm install --cache ./npm-cache
 
-          # 3) Pack the top-level Qwen Code CLI tarball
+          # 3) Pack Qwen Code CLI (pin the version you want)
           npm pack @qwen-code/qwen-code@0.2.0
 
-          # 4) Download Node.js MSI for the OFFLINE x64 machine
+          # 4) Download Node.js MSI for the offline x64 machine
           $nodeVersion = "20.17.0"
           $nodeMsi = "node-v$nodeVersion-x64.msi"
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v$nodeVersion/$nodeMsi" -OutFile $nodeMsi
 
-          # 5) Stage outputs
+          # 5) Stage outputs — use zip (not tar) on Windows
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          # Zip npm-cache and node_modules (Windows 'tar' can be flaky)
-          Compress-Archive -Path npm-cache -DestinationPath out/npm-cache.zip -Force
-          Compress-Archive -Path node_modules -DestinationPath out/node_modules.zip -Force
+          Compress-Archive -Path npm-cache      -DestinationPath out/npm-cache.zip    -Force
+          Compress-Archive -Path node_modules   -DestinationPath out/node_modules.zip -Force
 
-          # Move artifacts (quote paths to avoid glob quirks)
-          Get-ChildItem -Filter "*.tgz" | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination "out\" }
+          # Move artifacts into out/ (use literal paths)
+          Get-ChildItem -Filter "*.tgz" | ForEach-Object {
+            Move-Item -LiteralPath $_.FullName -Destination "out\"
+          }
           Move-Item -LiteralPath $nodeMsi -Destination "out\"
 
-          # Also include package.json and package-lock.json for reference
+          # Include package.json and the generated package-lock.json for reference
           Copy-Item package.json out\
           if (Test-Path package-lock.json) { Copy-Item package-lock.json out\ }
 
@@ -53,4 +62,3 @@ jobs:
         with:
           name: qwen-win64-offline-bundle
           path: qwen-offline/out/**
- 
