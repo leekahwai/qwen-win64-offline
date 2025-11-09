@@ -1,9 +1,10 @@
 name: Build Win64 Qwen Offline Bundle
 on:
   workflow_dispatch:
+
 jobs:
   build:
-    runs-on: windows-latest  # GitHub-hosted Windows x64
+    runs-on: windows-latest  # Windows x64 runner
     steps:
       - uses: actions/checkout@v4
 
@@ -18,38 +19,38 @@ jobs:
           Set-StrictMode -Version Latest
           cd qwen-offline
 
-          # Create a local npm cache so we can tar it up later
+          # 1) Create a dedicated npm cache folder
           New-Item -ItemType Directory -Force -Path npm-cache | Out-Null
 
-          # Install dependencies and fully populate cache (win32-x64)
-          npm ci --cache ./npm-cache
+          # 2) Install deps (also generates package-lock.json)
+          #    This populates our local cache for offline installs later
+          npm install --cache ./npm-cache
 
-          # Pack the top-level Qwen Code CLI into a tarball
-          # Reads version from package.json dependency
-          $version = (Get-Content package.json | Out-String)
-          npm pack @qwen-code/qwen-code
+          # 3) Pack the top-level Qwen Code CLI tarball
+          npm pack @qwen-code/qwen-code@0.2.0
 
-          # Grab Node.js Windows x64 MSI for the target offline machine
-          # Adjust version if you prefer a different 20.x.y
+          # 4) Download Node.js MSI for the OFFLINE x64 machine
           $nodeVersion = "20.17.0"
           $nodeMsi = "node-v$nodeVersion-x64.msi"
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v$nodeVersion/$nodeMsi" -OutFile $nodeMsi
 
-          # Package cache and node_modules for portability
+          # 5) Stage outputs
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          tar -cf out\npm-cache.tar npm-cache
-          tar -cf out\node_modules.tar node_modules
+          # Zip npm-cache and node_modules (Windows 'tar' can be flaky)
+          Compress-Archive -Path npm-cache -DestinationPath out/npm-cache.zip -Force
+          Compress-Archive -Path node_modules -DestinationPath out/node_modules.zip -Force
 
-          # Move artifacts into out/
-          Get-ChildItem qwen-offline\*.tgz -ErrorAction SilentlyContinue | ForEach-Object { Move-Item $_.FullName out\ }
-          if (-not (Test-Path out\*.tgz)) {
-            # If glob above didn't find (because of path difference), check cwd
-            Get-ChildItem *.tgz | ForEach-Object { Move-Item $_.FullName out\ }
-          }
-          Move-Item $nodeMsi out\
+          # Move artifacts (quote paths to avoid glob quirks)
+          Get-ChildItem -Filter "*.tgz" | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination "out\" }
+          Move-Item -LiteralPath $nodeMsi -Destination "out\"
+
+          # Also include package.json and package-lock.json for reference
+          Copy-Item package.json out\
+          if (Test-Path package-lock.json) { Copy-Item package-lock.json out\ }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: qwen-win64-offline-bundle
           path: qwen-offline/out/**
+ 
