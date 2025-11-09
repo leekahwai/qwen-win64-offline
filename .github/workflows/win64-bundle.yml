@@ -1,0 +1,55 @@
+name: Build Win64 Qwen Offline Bundle
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest  # GitHub-hosted Windows x64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Prepare offline bundle
+        shell: pwsh
+        run: |
+          Set-StrictMode -Version Latest
+          cd qwen-offline
+
+          # Create a local npm cache so we can tar it up later
+          New-Item -ItemType Directory -Force -Path npm-cache | Out-Null
+
+          # Install dependencies and fully populate cache (win32-x64)
+          npm ci --cache ./npm-cache
+
+          # Pack the top-level Qwen Code CLI into a tarball
+          # Reads version from package.json dependency
+          $version = (Get-Content package.json | Out-String)
+          npm pack @qwen-code/qwen-code
+
+          # Grab Node.js Windows x64 MSI for the target offline machine
+          # Adjust version if you prefer a different 20.x.y
+          $nodeVersion = "20.17.0"
+          $nodeMsi = "node-v$nodeVersion-x64.msi"
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$nodeVersion/$nodeMsi" -OutFile $nodeMsi
+
+          # Package cache and node_modules for portability
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          tar -cf out\npm-cache.tar npm-cache
+          tar -cf out\node_modules.tar node_modules
+
+          # Move artifacts into out/
+          Get-ChildItem qwen-offline\*.tgz -ErrorAction SilentlyContinue | ForEach-Object { Move-Item $_.FullName out\ }
+          if (-not (Test-Path out\*.tgz)) {
+            # If glob above didn't find (because of path difference), check cwd
+            Get-ChildItem *.tgz | ForEach-Object { Move-Item $_.FullName out\ }
+          }
+          Move-Item $nodeMsi out\
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen-win64-offline-bundle
+          path: qwen-offline/out/**
