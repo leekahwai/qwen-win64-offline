@@ -8,19 +8,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # (Optional) sanity check that the folder and package.json exist
-      - name: Show tree
+      - name: Show tree (sanity)
         shell: pwsh
         run: |
-          Write-Host "Repo root:"
-          Get-ChildItem -Force
-          Write-Host "`nqwen-offline contents:"
-          Get-ChildItem -Force qwen-offline
+          Write-Host "Repo root:"; Get-ChildItem -Force
+          Write-Host "`nqwen-offline contents:"; Get-ChildItem -Force qwen-offline
 
       - name: Install Node 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'   # keep major in sync with your target
+          node-version: '20'
 
       - name: Prepare offline bundle (warm full cache incl. transitive deps)
         shell: pwsh
@@ -28,20 +25,36 @@ jobs:
         run: |
           Set-StrictMode -Version Latest
 
-          # 1) Dedicated npm cache dir (we will ship this)
+          # 1) Dedicated npm cache dir (this is what we'll ship)
           New-Item -ItemType Directory -Force -Path npm-cache | Out-Null
 
-          # 2) Regular install to create package-lock.json and warm cache for local deps
+          # 2) Local install to create lockfile + warm cache for local deps
           npm install --cache ./npm-cache --no-audit --no-fund
 
-          # 3) ***CRUCIAL*** Simulate the same GLOBAL install you'll do offline.
-          #    This forces npm to fetch ALL transitive deps (e.g., tiktoken) into our cache.
+          # 3) Simulate the same GLOBAL install you'll do offline
           npm install -g @qwen-code/qwen-code@0.2.0 --cache ./npm-cache --no-audit --no-fund
 
-          # 4) Verify that critical transitive deps are present in the cache
-          $needles = @('tiktoken')
+          # 4) ***Explicitly pre-seed known problem deps into the cache***
+          #    a) tiktoken (plain)
+          $tiktokenVer = (npm view tiktoken version)
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tiktokenVer)) { $tiktokenVer = "latest" }
+          npm cache add tiktoken@$tiktokenVer --cache ./npm-cache
+
+          #    b) @dqbd/tiktoken (common alternative used by some libs)
+          $dqbdVer = (npm view @dqbd/tiktoken version)
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($dqbdVer)) { $dqbdVer = "latest" }
+          npm cache add @dqbd/tiktoken@$dqbdVer --cache ./npm-cache
+
+          #    c) (Optional) openai client is sometimes pulled; seed it too
+          $openaiVer = (npm view openai version)
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($openaiVer)) { $openaiVer = "latest" }
+          npm cache add openai@$openaiVer --cache ./npm-cache
+
+          # 5) Verify cache actually contains tiktoken artifacts
+          $needles = @('tiktoken', '@dqbd/tiktoken')
           foreach ($n in $needles) {
-            $hit = Get-ChildItem -Recurse -Path "npm-cache" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match $n } | Select-Object -First 1
+            $hit = Get-ChildItem -Recurse -Path "npm-cache" -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match "tiktoken" } | Select-Object -First 1
             if (-not $hit) {
               Write-Error "Dependency '$n' not found in npm-cache. Cache warming incomplete."
               exit 1
@@ -50,27 +63,24 @@ jobs:
             }
           }
 
-          # 5) Pack the Qwen Code CLI tarball we will install offline
+          # 6) Pack the Qwen Code CLI tarball we will install offline
           npm pack @qwen-code/qwen-code@0.2.0
 
-          # 6) (Optional) Download Node.js MSI for the offline x64 machine.
-          #    If you use the portable Node ZIP instead, you can comment these two lines.
+          # 7) Optional: download Node MSI (skip if you use portable zip on target)
           $nodeVersion = "20.17.0"
           $nodeMsi = "node-v$nodeVersion-x64.msi"
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v$nodeVersion/$nodeMsi" -OutFile $nodeMsi
 
-          # 7) Stage outputs — use zip (not tar) on Windows
+          # 8) Stage outputs — zip on Windows (avoid tar.exe quirks)
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Compress-Archive -Path npm-cache      -DestinationPath out/npm-cache.zip     -Force
           Compress-Archive -Path node_modules   -DestinationPath out/node_modules.zip  -Force
 
-          # Move artifacts into out/ (use literal paths)
-          Get-ChildItem -Filter "*.tgz" | ForEach-Object {
-            Move-Item -LiteralPath $_.FullName -Destination "out\"
-          }
+          # Move artifacts into out/
+          Get-ChildItem -Filter "*.tgz" | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination "out\" }
           if (Test-Path $nodeMsi) { Move-Item -LiteralPath $nodeMsi -Destination "out\" }
 
-          # Include package.json and the generated lockfile for reference
+          # Include package.json and lockfile for reference
           Copy-Item package.json out\
           if (Test-Path package-lock.json) { Copy-Item package-lock.json out\ }
 
