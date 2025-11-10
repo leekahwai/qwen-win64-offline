@@ -20,40 +20,57 @@ jobs:
       - name: Install Node 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20'   # keep major in sync with your target
 
-      - name: Prepare offline bundle
+      - name: Prepare offline bundle (warm full cache incl. transitive deps)
         shell: pwsh
         working-directory: qwen-offline
         run: |
           Set-StrictMode -Version Latest
 
-          # 1) Dedicated npm cache dir
+          # 1) Dedicated npm cache dir (we will ship this)
           New-Item -ItemType Directory -Force -Path npm-cache | Out-Null
 
-          # 2) Install deps (creates package-lock.json) and fully warms cache
-          npm install --cache ./npm-cache
+          # 2) Regular install to create package-lock.json and warm cache for local deps
+          npm install --cache ./npm-cache --no-audit --no-fund
 
-          # 3) Pack Qwen Code CLI (pin the version you want)
+          # 3) ***CRUCIAL*** Simulate the same GLOBAL install you'll do offline.
+          #    This forces npm to fetch ALL transitive deps (e.g., tiktoken) into our cache.
+          npm install -g @qwen-code/qwen-code@0.2.0 --cache ./npm-cache --no-audit --no-fund
+
+          # 4) Verify that critical transitive deps are present in the cache
+          $needles = @('tiktoken')
+          foreach ($n in $needles) {
+            $hit = Get-ChildItem -Recurse -Path "npm-cache" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match $n } | Select-Object -First 1
+            if (-not $hit) {
+              Write-Error "Dependency '$n' not found in npm-cache. Cache warming incomplete."
+              exit 1
+            } else {
+              Write-Host "Found '$n' in cache at: $($hit.FullName)"
+            }
+          }
+
+          # 5) Pack the Qwen Code CLI tarball we will install offline
           npm pack @qwen-code/qwen-code@0.2.0
 
-          # 4) Download Node.js MSI for the offline x64 machine
+          # 6) (Optional) Download Node.js MSI for the offline x64 machine.
+          #    If you use the portable Node ZIP instead, you can comment these two lines.
           $nodeVersion = "20.17.0"
           $nodeMsi = "node-v$nodeVersion-x64.msi"
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v$nodeVersion/$nodeMsi" -OutFile $nodeMsi
 
-          # 5) Stage outputs — use zip (not tar) on Windows
+          # 7) Stage outputs — use zip (not tar) on Windows
           New-Item -ItemType Directory -Force -Path out | Out-Null
-          Compress-Archive -Path npm-cache      -DestinationPath out/npm-cache.zip    -Force
-          Compress-Archive -Path node_modules   -DestinationPath out/node_modules.zip -Force
+          Compress-Archive -Path npm-cache      -DestinationPath out/npm-cache.zip     -Force
+          Compress-Archive -Path node_modules   -DestinationPath out/node_modules.zip  -Force
 
           # Move artifacts into out/ (use literal paths)
           Get-ChildItem -Filter "*.tgz" | ForEach-Object {
             Move-Item -LiteralPath $_.FullName -Destination "out\"
           }
-          Move-Item -LiteralPath $nodeMsi -Destination "out\"
+          if (Test-Path $nodeMsi) { Move-Item -LiteralPath $nodeMsi -Destination "out\" }
 
-          # Include package.json and the generated package-lock.json for reference
+          # Include package.json and the generated lockfile for reference
           Copy-Item package.json out\
           if (Test-Path package-lock.json) { Copy-Item package-lock.json out\ }
 
