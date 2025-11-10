@@ -1,26 +1,55 @@
-      - name: Prepare offline bundle (warm cache, seed tarballs, warm metadata, verify)
+name: Build Win64 Qwen Offline Bundle
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    defaults:
+      run:
         shell: pwsh
         working-directory: qwen-offline
+
+    env:
+      QWEN_VERSION: '0.2.0'
+      NODE_VERSION: '20.17.0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show tree (sanity)
+        working-directory: .
+        run: |
+          Write-Host "Repo root:"; Get-ChildItem -Force
+          Write-Host "`nqwen-offline contents:"; Get-ChildItem -Force qwen-offline
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Prepare offline bundle (warm cache, seed tarballs, warm metadata, verify)
         run: |
           Set-StrictMode -Version Latest
 
-          # Ensure npm is ONLINE on the runner (we're building the offline bundle here)
+          # Ensure npm is ONLINE on the runner (we are BUILDING an offline cache here)
           npm config delete offline 2>$null
           $env:NPM_CONFIG_OFFLINE = $null
-          npm config set registry "https://registry.npmjs.org/"
+          npm config set registry 'https://registry.npmjs.org/'
           npm config set fetch-retries 4
           npm config set fetch-timeout 60000
 
-          # 1) Cache folder to ship
+          # 1) Cache folder we will ship
           New-Item -ItemType Directory -Force -Path npm-cache | Out-Null
 
-          # 2) Local install -> create lockfile & warm cache for local deps
+          # 2) Local install -> create lockfile & warm cache for local deps in package.json
           npm install --cache ./npm-cache --no-audit --no-fund
 
-          # 3) Simulate the GLOBAL install you'll do on the offline box
-          npm install -g @qwen-code/qwen-code@0.2.0 --cache ./npm-cache --no-audit --no-fund
+          # 3) Simulate the GLOBAL install you will do offline (drags most transitive deps)
+          npm install -g "@qwen-code/qwen-code@${env:QWEN_VERSION}" --cache ./npm-cache --no-audit --no-fund
 
-          # 4) Seed stubborn deps by TARBALL so they're guaranteed in the content-addressable cache
+          # 4) Seed stubborn deps by TARBALL into the cache (content-addressable)
           function Seed-From-Tarball {
             param([string]$pkg)
             Write-Host "Seeding (tarball) $pkg ..."
@@ -45,40 +74,35 @@
             }
           }
 
-          # Usual suspects for LLM CLIs
-          Seed-From-Tarball 'tiktoken'
-          Seed-From-Tarball '@dqbd/tiktoken'
-          Seed-From-Tarball 'openai'
+          # Seed usual suspects (add more here if any error names a new package)
+          $seedPkgs = @('tiktoken', '@dqbd/tiktoken', 'openai')
+          foreach ($p in $seedPkgs) { Seed-From-Tarball $p }
 
-          # 5) ***Warm METADATA (packuments) online*** so offline installs won't ENOTCACHED.
-          #    We install each pkg once in a throwaway project (online) pointing at our cache.
+          # 5) Warm METADATA (packuments) for scoped/edge packages with an online install
           function Warm-Metadata {
             param([string]$pkg)
-            Write-Host "Warming metadata for $pkg (online install into temp project)..."
+            Write-Host "Warming metadata for $pkg (online temp install using our cache)..."
             if (Test-Path tmp_online) { Remove-Item -Recurse -Force tmp_online }
             New-Item -ItemType Directory -Force -Path tmp_online | Out-Null
             Push-Location tmp_online
             npm init -y | Out-Null
+            npm pkg set name='tmp-online' | Out-Null
             npm config set cache '../npm-cache'
             npm install "$pkg" --no-audit --no-fund
             Pop-Location
             Remove-Item -Recurse -Force tmp_online
           }
-
-          Warm-Metadata 'tiktoken'
-          Warm-Metadata '@dqbd/tiktoken'
-          Warm-Metadata 'openai'
+          foreach ($p in $seedPkgs) { Warm-Metadata $p }
 
           # 6) Verify with a REAL offline install test against our cache
           function Test-Offline-Install {
             param([string]$pkg)
             Write-Host "Testing offline install of $pkg ..."
             if (Test-Path tmp_offline) { Remove-Item -Recurse -Force tmp_offline }
-            New-Item -ItemType Directory -Force -Path tmp_offline | Out-Null   # <-- no leading dot
+            New-Item -ItemType Directory -Force -Path tmp_offline | Out-Null
             Push-Location tmp_offline
             npm init -y | Out-Null
-            # Ensure valid package.json name (npm may derive from folder)
-            npm pkg set name="tmp-offline" | Out-Null
+            npm pkg set name='tmp-offline' | Out-Null
             npm config set cache '../npm-cache'
             npm install "$pkg" --offline --no-audit --no-fund
             $ok = $LASTEXITCODE -eq 0
@@ -86,28 +110,30 @@
             Remove-Item -Recurse -Force tmp_offline
             if (-not $ok) { Write-Error "Package '$pkg' not installable offline from cache."; exit 1 }
           }
-
-          Test-Offline-Install 'tiktoken'
-          Test-Offline-Install '@dqbd/tiktoken'
-          Test-Offline-Install 'openai'
+          foreach ($p in $seedPkgs) { Test-Offline-Install $p }
 
           # 7) Pack the Qwen Code CLI tarball for the target
-          npm pack @qwen-code/qwen-code@0.2.0
+          npm pack "@qwen-code/qwen-code@${env:QWEN_VERSION}"
 
-          # 8) Optional: Node MSI for target (skip if you use portable ZIP)
-          $nodeVersion = '20.17.0'
-          $nodeMsi = "node-v$nodeVersion-x64.msi"
-          Invoke-WebRequest -Uri "https://nodejs.org/dist/v$nodeVersion/$nodeMsi" -OutFile $nodeMsi
+          # 8) (Optional) Download Node MSI for the target (skip if you use portable ZIP)
+          $nodeMsi = "node-v${env:NODE_VERSION}-x64.msi"
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/v${env:NODE_VERSION}/$nodeMsi" -OutFile $nodeMsi
 
           # 9) Zip outputs (avoid tar.exe on Windows)
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Compress-Archive -Path npm-cache    -DestinationPath out/npm-cache.zip    -Force
           Compress-Archive -Path node_modules -DestinationPath out/node_modules.zip -Force
 
-          # Move artifacts to out/ (safe quoting)
+          # Move artifacts to out/ (use single quotes to avoid escaping issues)
           Get-ChildItem -Filter '*.tgz' | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination 'out\' }
           if (Test-Path $nodeMsi) { Move-Item -LiteralPath $nodeMsi -Destination 'out\' }
 
           # Include manifests
           Copy-Item package.json 'out\'
           if (Test-Path package-lock.json) { Copy-Item package-lock.json 'out\' }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qwen-win64-offline-bundle
+          path: qwen-offline/out/**
