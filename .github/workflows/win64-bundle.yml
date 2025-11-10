@@ -25,36 +25,56 @@ jobs:
         run: |
           Set-StrictMode -Version Latest
 
-          # 1) Dedicated npm cache dir (this is what we'll ship)
+          # --- Ensure npm is ONLINE on the runner (do this first) ---
+          # If a previous step or default env toggled offline, clear it.
+          npm config delete offline 2>$null
+          $env:NPM_CONFIG_OFFLINE = $null
+          npm config set registry "https://registry.npmjs.org/"
+          npm config set fetch-retries 4
+          npm config set fetch-timeout 60000
+
+          # 1) Dedicated npm cache dir (we will ship this)
           New-Item -ItemType Directory -Force -Path npm-cache | Out-Null
 
-          # 2) Local install to create lockfile + warm cache for local deps
+          # 2) Local install -> creates lockfile & warms cache
           npm install --cache ./npm-cache --no-audit --no-fund
 
-          # 3) Simulate the same GLOBAL install you'll do offline
+          # 3) Simulate your offline GLOBAL install path to pull all transitive deps
           npm install -g @qwen-code/qwen-code@0.2.0 --cache ./npm-cache --no-audit --no-fund
 
-          # 4) ***Explicitly pre-seed known problem deps into the cache***
-          #    a) tiktoken (plain)
-          $tiktokenVer = (npm view tiktoken version)
-          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tiktokenVer)) { $tiktokenVer = "latest" }
-          npm cache add tiktoken@$tiktokenVer --cache ./npm-cache
+          # 4) Explicitly pre-seed known deps that sometimes evade the graph
+          function Seed-To-Cache {
+            param([string]$pkg)
+            Write-Host "Seeding $pkg ..."
+            # Get the latest dist-tag version (stay online here)
+            $ver = (npm view $pkg version) 2>$null
+            if (-not $ver) { $ver = "latest" }
+            # Try to add directly to cache (online)
+            npm cache add "$pkg@$ver" --cache ./npm-cache 2>$null
+            if ($LASTEXITCODE -ne 0) {
+              # Fallback: fetch the tarball explicitly then cache from file
+              Write-Host "Direct cache add failed; trying explicit pack for $pkg@$ver ..."
+              npm pack "$pkg@$ver"
+              $tgz = Get-ChildItem -Filter "*.tgz" | Where-Object { $_.Name -match ([Regex]::Escape($pkg.Split('/')[-1])) } | Select-Object -First 1
+              if ($tgz) {
+                npm cache add $tgz.FullName --cache ./npm-cache
+                # keep workspace tidy
+                Remove-Item -LiteralPath $tgz.FullName -Force
+              }
+            }
+          }
 
-          #    b) @dqbd/tiktoken (common alternative used by some libs)
-          $dqbdVer = (npm view @dqbd/tiktoken version)
-          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($dqbdVer)) { $dqbdVer = "latest" }
-          npm cache add @dqbd/tiktoken@$dqbdVer --cache ./npm-cache
+          Seed-To-Cache "tiktoken"
+          Seed-To-Cache "@dqbd/tiktoken"
+          # (Optional) often useful in LLM stacks:
+          Seed-To-Cache "openai"
 
-          #    c) (Optional) openai client is sometimes pulled; seed it too
-          $openaiVer = (npm view openai version)
-          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($openaiVer)) { $openaiVer = "latest" }
-          npm cache add openai@$openaiVer --cache ./npm-cache
-
-          # 5) Verify cache actually contains tiktoken artifacts
+          # 5) Verify cache actually contains tiktoken
           $needles = @('tiktoken', '@dqbd/tiktoken')
           foreach ($n in $needles) {
             $hit = Get-ChildItem -Recurse -Path "npm-cache" -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match "tiktoken" } | Select-Object -First 1
+              Where-Object { $_.Name -match "tiktoken" -or $_.FullName -match "tiktoken" } |
+              Select-Object -First 1
             if (-not $hit) {
               Write-Error "Dependency '$n' not found in npm-cache. Cache warming incomplete."
               exit 1
@@ -63,15 +83,15 @@ jobs:
             }
           }
 
-          # 6) Pack the Qwen Code CLI tarball we will install offline
+          # 6) Pack the Qwen Code CLI tarball for offline install
           npm pack @qwen-code/qwen-code@0.2.0
 
-          # 7) Optional: download Node MSI (skip if you use portable zip on target)
+          # 7) Optional: Node MSI (skip if you use a portable Node zip on target)
           $nodeVersion = "20.17.0"
           $nodeMsi = "node-v$nodeVersion-x64.msi"
           Invoke-WebRequest -Uri "https://nodejs.org/dist/v$nodeVersion/$nodeMsi" -OutFile $nodeMsi
 
-          # 8) Stage outputs — zip on Windows (avoid tar.exe quirks)
+          # 8) Zip outputs (no tar on Windows)
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Compress-Archive -Path npm-cache      -DestinationPath out/npm-cache.zip     -Force
           Compress-Archive -Path node_modules   -DestinationPath out/node_modules.zip  -Force
@@ -80,7 +100,7 @@ jobs:
           Get-ChildItem -Filter "*.tgz" | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination "out\" }
           if (Test-Path $nodeMsi) { Move-Item -LiteralPath $nodeMsi -Destination "out\" }
 
-          # Include package.json and lockfile for reference
+          # Include manifest & lockfile for reference
           Copy-Item package.json out\
           if (Test-Path package-lock.json) { Copy-Item package-lock.json out\ }
 
