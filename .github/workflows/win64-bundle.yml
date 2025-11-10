@@ -6,7 +6,6 @@ jobs:
   build:
     runs-on: windows-latest
 
-    # Make pwsh + working dir defaults so we don't repeat them
     defaults:
       run:
         shell: pwsh
@@ -15,7 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Sanity: show repo and qwen-offline contents (runs at repo root)
       - name: Show tree (sanity)
         working-directory: .
         run: |
@@ -72,7 +70,6 @@ jobs:
             }
           }
 
-          # Usual suspects for offline LLM CLIs
           Seed-From-Tarball "tiktoken"
           Seed-From-Tarball "@dqbd/tiktoken"
           Seed-From-Tarball "openai"
@@ -110,13 +107,13 @@ jobs:
           Compress-Archive -Path npm-cache    -DestinationPath out/npm-cache.zip    -Force
           Compress-Archive -Path node_modules -DestinationPath out/node_modules.zip -Force
 
-          # Move artifacts to out/
-          Get-ChildItem -Filter "*.tgz" | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination "out\" }
-          if (Test-Path $nodeMsi) { Move-Item -LiteralPath $nodeMsi -Destination "out\"" }
+          # Move artifacts to out/  (FIXED QUOTING BELOW)
+          Get-ChildItem -Filter "*.tgz" | ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination 'out\' }
+          if (Test-Path $nodeMsi) { Move-Item -LiteralPath $nodeMsi -Destination 'out\' }
 
-          # Include manifests
-          Copy-Item package.json out\
-          if (Test-Path package-lock.json) { Copy-Item package-lock.json out\ }
+          # Include manifests  (FIXED QUOTING BELOW)
+          Copy-Item package.json 'out\'
+          if (Test-Path package-lock.json) { Copy-Item package-lock.json 'out\' }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
